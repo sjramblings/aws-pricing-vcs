@@ -1,0 +1,24 @@
+{
+  "name": "aws-pricing-vcs",
+  "version": "0.1.0",
+  "description": "Fetch AWS service pricing via the Pricing API and ingest it into Viking Context Service (VCS) as L0/L1/L2 context for LLM cost modelling.",
+  "type": "module",
+  "module": "src/cli.ts",
+  "bin": {
+    "aws-pricing-vcs": "src/cli.ts"
+  },
+  "scripts": {
+    "ingest": "bun run src/cli.ts ingest",
+    "list": "bun run src/cli.ts list-services",
+    "typecheck": "bun x tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-pricing": "^3.654.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
