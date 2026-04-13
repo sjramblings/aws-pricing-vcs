@@ -60,9 +60,17 @@ const PROVIDER_ALIASES: Record<string, string> = {
 };
 
 function normaliseProvider(raw: string): string {
-  // Collapse whitespace and punctuation to hyphens so "Mistral AI" and
-  // "mistral-ai" map to the same alias key.
-  const key = raw.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  // Collapse any run of non-alphanumeric characters (whitespace, punctuation,
+  // underscores, dots) to a single hyphen so "Mistral AI", "mistral-ai",
+  // "Mistral_AI", and "Z.AI" all reach the same alias key. Then trim any
+  // leading/trailing hyphens. Without this, "Z.AI" would normalise to "z.ai"
+  // and miss the z-ai → zai alias, fragmenting a single provider into
+  // multiple group keys and producing duplicate documents.
+  const key = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
   return PROVIDER_ALIASES[key] ?? key;
 }
 
@@ -258,3 +266,5 @@ export const bedrockFetcher: Fetcher = {
     return docs;
   },
 };
+
+export const __test__ = { normaliseProvider, extractModelKey, inferProviderFromModelName };
