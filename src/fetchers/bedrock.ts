@@ -6,6 +6,7 @@ interface BedrockAttrs {
   model?: string;
   modelId?: string;
   titleModelId?: string;
+  titanModel?: string;
   provider?: string;
   usagetype?: string;
   operation?: string;
@@ -15,6 +16,8 @@ interface BedrockAttrs {
   servicecode?: string;
   servicename?: string;
   feature?: string;
+  policyType?: string;
+  featureType?: string;
 }
 
 interface RawProduct {
@@ -48,31 +51,61 @@ interface PriceRow {
   description: string;
 }
 
+const PROVIDER_ALIASES: Record<string, string> = {
+  "mistral-ai": "mistral",
+  "moonshot-ai": "moonshot",
+  "kimi-ai": "moonshot",
+  "minimax-ai": "minimax",
+  "z-ai": "zai",
+};
+
+function normaliseProvider(raw: string): string {
+  // Collapse whitespace and punctuation to hyphens so "Mistral AI" and
+  // "mistral-ai" map to the same alias key.
+  const key = raw.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  return PROVIDER_ALIASES[key] ?? key;
+}
+
+function inferProviderFromModelName(model: string): string {
+  const lower = model.toLowerCase();
+  if (lower.includes("claude")) return "anthropic";
+  if (lower.startsWith("nova") || lower.startsWith("titan")) return "amazon";
+  if (lower.startsWith("llama")) return "meta";
+  if (lower.startsWith("mistral") || lower.startsWith("mixtral")) return "mistral";
+  if (lower.startsWith("command") || lower.startsWith("embed-")) return "cohere";
+  if (lower.startsWith("jamba")) return "ai21";
+  if (lower.startsWith("gemma")) return "google";
+  if (lower.startsWith("deepseek")) return "deepseek";
+  if (lower.startsWith("palmyra") || lower.startsWith("writer")) return "writer";
+  return "unknown";
+}
+
 function extractModelKey(attrs: BedrockAttrs): { provider: string; model: string } | null {
-  const raw = attrs.model || attrs.titleModelId || attrs.modelId || "";
-  if (!raw) return null;
+  // Pricing API attribute schema varies across providers:
+  //   - Older Anthropic/Claude 2/3 and Mistral: `provider` + `model`
+  //   - Llama/Nova: `model` only (no `provider`)
+  //   - Titan family: `titanModel` only
+  // We accept all three shapes and infer provider from the model name when
+  // it's missing. SKUs that are guardrails, knowledge bases, or custom model
+  // units (no model at all) are correctly filtered out.
+  //
+  // Do NOT split model strings on ".", which mangles names like
+  // "Claude 3.5", "Nova 2.0", and "Mixtral 8x7B v0.1".
+  const modelRaw = (
+    attrs.model ||
+    attrs.titanModel ||
+    attrs.titleModelId ||
+    attrs.modelId ||
+    ""
+  ).trim();
+  if (!modelRaw) return null;
 
-  let provider = (attrs.provider || "").toLowerCase();
-  let model = raw;
+  const providerRaw = (attrs.provider || "").trim();
+  const provider = providerRaw
+    ? normaliseProvider(providerRaw)
+    : normaliseProvider(inferProviderFromModelName(modelRaw));
 
-  if (raw.includes(".")) {
-    const [p, ...rest] = raw.split(".");
-    if (!provider) provider = p.toLowerCase();
-    model = rest.join(".");
-  }
-
-  if (!provider) {
-    const lower = model.toLowerCase();
-    if (lower.includes("claude")) provider = "anthropic";
-    else if (lower.includes("nova") || lower.includes("titan")) provider = "amazon";
-    else if (lower.includes("llama")) provider = "meta";
-    else if (lower.includes("mistral") || lower.includes("mixtral")) provider = "mistral";
-    else if (lower.includes("command")) provider = "cohere";
-    else if (lower.includes("jamba")) provider = "ai21";
-    else provider = "unknown";
-  }
-
-  return { provider, model };
+  return { provider, model: modelRaw };
 }
 
 function toNumber(priceMap: Record<string, string> | undefined): number {
@@ -138,10 +171,37 @@ export const bedrockFetcher: Fetcher = {
     for (const g of groups.values()) {
       if (g.rows.length === 0) continue;
 
-      g.rows.sort((a, b) => {
-        const r = a.region.localeCompare(b.region);
-        return r !== 0 ? r : a.usageType.localeCompare(b.usageType);
-      });
+      // Nova 2.0 models produce hundreds of SKUs across ~20 regions; raw
+      // output blows past 100KB. Collapse rows that share (usageType, unit,
+      // price) into a single row listing the regions where that price applies.
+      // This preserves all pricing information in a much smaller form.
+      // Also strip the verbose description column — its contents duplicate
+      // the other columns and add ~100 bytes per row of redundant text.
+      // Normalise the region-prefixed usage type so rows for the same
+      // dimension in different regions collapse. AWS uses prefixes like
+      // "USE1-", "USW2-", "APS2-", "EUW1-" which are just the region code.
+      const stripRegionPrefix = (ut: string): string =>
+        ut.replace(/^[A-Z]{2,4}\d?-/, "");
+
+      const collapsed = new Map<string, { usageType: string; unit: string; priceUSD: number; regions: Set<string> }>();
+      for (const r of g.rows) {
+        const normUsage = stripRegionPrefix(r.usageType);
+        const key = `${normUsage}|${r.unit}|${r.priceUSD}`;
+        let entry = collapsed.get(key);
+        if (!entry) {
+          entry = { usageType: normUsage, unit: r.unit, priceUSD: r.priceUSD, regions: new Set() };
+          collapsed.set(key, entry);
+        }
+        entry.regions.add(r.region);
+      }
+      const collapsedRows = Array.from(collapsed.values())
+        .map((c) => ({
+          usageType: c.usageType,
+          regions: Array.from(c.regions).sort().join(", "),
+          unit: c.unit,
+          priceUSD: c.priceUSD,
+        }))
+        .sort((a, b) => a.usageType.localeCompare(b.usageType));
 
       const regions = Array.from(new Set(g.rows.map((r) => r.region))).sort();
       const usageTypes = Array.from(new Set(g.rows.map((r) => r.usageType))).sort();
@@ -159,8 +219,8 @@ export const bedrockFetcher: Fetcher = {
       });
 
       const table = renderTable(
-        ["Usage type", "Region", "Unit", "Price USD", "Description"],
-        g.rows.map((r) => [r.usageType, r.region, r.unit, r.priceUSD, r.description]),
+        ["Usage type", "Regions", "Unit", "Price USD"],
+        collapsedRows.map((r) => [r.usageType, r.regions, r.unit, r.priceUSD]),
       );
 
       const title = `${g.provider}/${g.model} — Bedrock pricing`;
@@ -171,7 +231,7 @@ export const bedrockFetcher: Fetcher = {
         `- Model: \`${g.model}\`\n` +
         `- Regions covered: ${regions.join(", ")}\n` +
         `- Usage types: ${usageTypes.join(", ")}\n` +
-        `- Price dimensions: ${g.rows.length}\n` +
+        `- Price dimensions: ${collapsedRows.length} (collapsed from ${g.rows.length} SKU rows)\n` +
         `- Fetched: ${today}\n\n` +
         `## Pricing dimensions\n\n${table}\n\n` +
         `## Notes\n\n` +

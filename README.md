@@ -62,6 +62,14 @@ src/
     └── bedrock.ts             # AmazonBedrock → one doc per model
 ```
 
+## Known data gaps
+
+The AWS Pricing API does not expose every Bedrock model. Observed gaps as of 2026-04-13:
+
+- **Newer Anthropic Claude models** (Claude 3.5 Sonnet, Claude 4, Sonnet 4.6, Opus 4.6, Haiku 4.5) are **not** returned by `GetProducts(ServiceCode=AmazonBedrock)`. Only Claude 2.x, Claude 3 Sonnet, Claude 3 Haiku, and Claude Instant appear. Use the published pricing page or the model-card API for newer Claude prices until AWS adds them.
+- **Guardrails, Knowledge Bases, and Custom Model Units** (~577 SKUs) are skipped because they are not per-model inference pricing. Add a separate fetcher if they become relevant.
+- **Oversized docs**: Nova 2.0 Omni and Nova 2.0 Pro currently generate ~120–130KB markdown documents (~20–30% over the informal 100KB guideline) due to their broad cross-region × usage-type matrix. VCS may still accept them; the CLI warns but does not block.
+
 ## Scope
 
 **In:** on-demand public pricing via the Pricing API, overwrite-latest ingestion, CLI only.
